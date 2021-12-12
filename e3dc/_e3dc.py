@@ -709,6 +709,7 @@ class E3DC:
                     'maxBatVoltage': maximum battery voltage
                     'maxChargeCurrent': maximum charge current
                     'maxDcbCellTemp': maximum Dcb cell temp
+                    'minDcbCellTemp': maximum Dcb cell temp
                     'maxDischargeCurrent': maximum discharge current
                     'moduleVoltage': module voltage
                     'rsoc': state of charge
@@ -723,6 +724,7 @@ class E3DC:
             ('BAT_INDEX', 'Uint16', batIndex), 
             ('BAT_REQ_DEVICE_STATE', 'None', None), 
             ('BAT_REQ_MAX_DCB_CELL_TEMPERATURE', 'None', None),
+            ('BAT_REQ_MIN_DCB_CELL_TEMPERATURE', 'None', None),
             ('BAT_REQ_MODULE_VOLTAGE', 'None', None), 
             ('BAT_REQ_CURRENT', 'None', None), 
             ('BAT_REQ_MAX_BAT_VOLTAGE', 'None', None), 
@@ -754,6 +756,7 @@ class E3DC:
         maxBatVoltage = round(rscpFindTag(req, 'BAT_MAX_BAT_VOLTAGE')[2],2)
         maxChargeCurrent = round(rscpFindTag(req, 'BAT_MAX_CHARGE_CURRENT')[2],2)
         maxDcbCellTemp = round(rscpFindTag(req, 'BAT_MAX_DCB_CELL_TEMPERATURE')[2],2)
+        minDcbCellTemp = round(rscpFindTag(req, 'BAT_MIN_DCB_CELL_TEMPERATURE')[2],2)
         maxDischargeCurrent = round(rscpFindTag(req, 'BAT_MAX_DISCHARGE_CURRENT')[2],2)
         moduleVoltage = round(rscpFindTag(req, 'BAT_MODULE_VOLTAGE')[2],2)
         rsoc = round(rscpFindTag(req, 'BAT_RSOC')[2],2)
@@ -776,6 +779,7 @@ class E3DC:
             'maxBatVoltage': maxBatVoltage,
             'maxChargeCurrent': maxChargeCurrent,
             'maxDcbCellTemp': maxDcbCellTemp,
+            'minDcbCellTemp': minDcbCellTemp,
             'maxDischargeCurrent': maxDischargeCurrent,
             'moduleVoltage': moduleVoltage,
             'rsoc': rsoc,
