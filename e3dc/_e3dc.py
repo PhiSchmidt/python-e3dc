@@ -12,7 +12,7 @@ import datetime
 import json
 import uuid
 from ._e3dc_rscp_web import E3DC_RSCP_web
-from ._e3dc_rscp_local import E3DC_RSCP_local, RSCPAuthenticationError
+from ._e3dc_rscp_local import E3DC_RSCP_local, RSCPAuthenticationError, RSCPNotAvailableError
 from ._rscpLib import rscpFindTag
 
 REMOTE_ADDRESS='https://s10.e3dc.com/s10/phpcmd/cmd.php'
@@ -20,6 +20,9 @@ REQUEST_INTERVAL_SEC = 10 # minimum interval between requests
 REQUEST_INTERVAL_SEC_LOCAL = 1 # minimum interval between requests
 
 class AuthenticationError(Exception):
+    pass
+
+class NotAvailableError(Exception):
     pass
 
 class PollError(Exception):
@@ -43,7 +46,7 @@ class E3DC:
     DAY_SATURDAY = 5
     DAY_SUNDAY = 6
 
-    IDLE_TYPE = {'idleCharge': 0, 'idleDisharge': 1}
+    IDLE_TYPE = {'idleCharge': 0, 'idleDischarge': 1}
     
     def __init__(self, connectType, **kwargs):
         """Constructor of a E3DC object (does not connect)
@@ -68,6 +71,28 @@ class E3DC:
         self.username = kwargs['username']
         self.serialNumber  = None
         self.serialNumberPrefix  = None
+        
+        self.jar = None
+        self.guid = "GUID-" + str(uuid.uuid1())
+        self.lastRequestTime = -1
+        self.lastRequest = None
+        self.connected = False
+
+        # static values
+        self.deratePercent = None
+        self.deratePower  = None
+        self.installedPeakPower  = None
+        self.installedBatteryCapacity = None
+        self.externalSourceAvailable = None
+        self.macAddress = None
+        self.model = None
+        self.maxAcPower  = None
+        self.maxBatChargePower = None
+        self.maxBatDischargePower = None
+        self.startDischargeDefault = None
+        self.pmIndex = None
+        self.pmIndexExt = None
+
         if connectType == self.CONNECT_LOCAL:
             self.ip = kwargs['ipAddress']
             self.key = kwargs['key']
@@ -83,25 +108,6 @@ class E3DC:
                     self.password = hashlib.md5(kwargs['password'].encode('utf-8')).hexdigest()
             self.rscp = E3DC_RSCP_web(self.username, self.password, '{}{}'.format(self.serialNumberPrefix, self.serialNumber))
             self.poll = self.poll_ajax
-        
-        self.jar = None
-        self.guid = "GUID-" + str(uuid.uuid1())
-        self.lastRequestTime = -1
-        self.lastRequest = None
-        self.connected = False
-
-        # static values
-        self.deratePercent = None
-        self.deratePower  = None
-        self.installedPeakPower  = None
-        self.installedBatteryCapacity = None
-        self.macAddress = None
-        self.model = None
-        self.maxAcPower  = None
-        self.maxBatChargePower = None
-        self.maxBatDischargePower = None
-        self.startDischargeDefault = None
-        self.pmIndex = None
 
         self.get_system_info_static(keepAlive=True)
         
@@ -114,26 +120,31 @@ class E3DC:
         if self.serialNumber.startswith("4"):
             self.model = "S10E"
             self.pmIndex = 0
+            self.pmIndexExt = 1
             if not self.serialNumberPrefix:
                 self.serialNumberPrefix = 'S10-'
         elif self.serialNumber.startswith("5"):
             self.model = "S10mini"
             self.pmIndex = 6
+            self.pmIndexExt = 1
             if not self.serialNumberPrefix:
                 self.serialNumberPrefix = 'S10-'
         elif self.serialNumber.startswith("6"):
             self.model = "Quattroporte"
-            self.pmIndex = 0 #not validated
+            self.pmIndex = 6
+            self.pmIndexExt = 1
             if not self.serialNumberPrefix:
-                self.serialNumberPrefix = 'S10-' # Not sure if this is corrent
+                self.serialNumberPrefix = 'Q10-'
         elif self.serialNumber.startswith("7"):
             self.model = "Pro"
-            self.pmIndex = 0
+            self.pmIndex = 6
+            self.pmIndexExt = 1
             if not self.serialNumberPrefix:
                 self.serialNumberPrefix = 'P10-'
         else:
             self.model = "NA"
             self.pmIndex = 0
+            self.pmIndexExt = 1
 
     def connect_local(self):
         pass
@@ -184,9 +195,6 @@ class E3DC:
         if self.connected == False:
             self.connect_web()
         
-        if self.lastRequest is not None and (time.time() - self.lastRequestTime) < REQUEST_INTERVAL_SEC:
-            return lastRequest
-        
         pollPayload = { 'DO' : 'LIVEUNITDATA' }
         pollHeaders = { 'Pragma' : 'no-cache', 'Cache-Control' : 'no-store', 'Window-Id' : self.guid }
         
@@ -200,8 +208,6 @@ class E3DC:
         if jsonResponse['ERRNO'] != 0:
             raise PollError("Error polling: %d" % (jsonResponse['ERRNO']))
         
-        self.lastRequest = jsonResponse['CONTENT']
-        self.lastRequestTime = time.time()
         return json.loads(jsonResponse['CONTENT'])
         
     def poll_ajax(self, **kwargs):
@@ -213,27 +219,33 @@ class E3DC:
                     'time': datetime object containing the timestamp
                     'sysStatus': string containing the system status code
                     'stateOfCharge': battery charge status in %
-                    'production': { production values: positive means entering the system
-                        'solar' : production from solar in W
-                        'grid' : absorption from grid in W
-                        },
                     'consumption': { consumption values: positive means exiting the system
                         'battery': power entering battery (positive: charging, negative: discharging)
                         'house': house consumption
                         'wallbox': wallbox consumption
-                    }
+                    },
+                    'production': { production values: positive means entering the system
+                        'solar' : production from solar in W
+                        'add' : additional external power in W
+                        'grid' : absorption from grid in W
+                        }
                 }
             
         Raises:
             e3dc.PollError in case of problems polling
         """
+        if self.lastRequest is not None and (time.time() - self.lastRequestTime) < REQUEST_INTERVAL_SEC:
+            return self.lastRequest
+        
         raw = self.poll_ajax_raw()
+        strPmIndex = str(self.pmIndexExt)
         outObj = {
             'time': dateutil.parser.parse(raw['time']).replace(tzinfo=datetime.timezone.utc),
             'sysStatus': raw['SYSSTATUS'],
             'stateOfCharge': int(raw['SOC']),
             'production': {
                 'solar' : int(raw["POWER_PV_S1"]) + int(raw["POWER_PV_S2"]) + int(raw["POWER_PV_S3"]),
+                'add' : -(int(raw["PM" + strPmIndex + "_L1"]) + int(raw["PM" + strPmIndex + "_L2"]) + int(raw["PM" + strPmIndex + "_L3"])),
                 'grid' : int(raw["POWER_LM_L1"]) + int(raw["POWER_LM_L2"]) + int(raw["POWER_LM_L3"])
                 },
             'consumption': {
@@ -242,6 +254,10 @@ class E3DC:
                 'wallbox': int(raw["POWER_WALLBOX"])
                 }
             }
+            
+        self.lastRequest = outObj
+        self.lastRequestTime = time.time()
+        
         return outObj
     
     def poll_rscp(self, keepAlive = False):
@@ -255,13 +271,13 @@ class E3DC:
                         'battery': power entering battery (positive: charging, negative: discharging)
                         'house': house consumption
                         'wallbox': wallbox consumption
-                    }                    
+                    }
                     'production': { production values: positive means entering the system
                         'solar' : production from solar in W
+                        'add' : additional external power in W
                         'grid' : absorption from grid in W
-                    }            
+                    }
                     'stateOfCharge': battery charge status in %
-                    'sysStatus': string containing the system status code
                     'selfConsumption': self consumed power in %
                     'time': datetime object containing the timestamp
                 }
@@ -270,9 +286,9 @@ class E3DC:
             return self.lastRequest
         
         ts = self.sendRequest( ('INFO_REQ_UTC_TIME', 'None', None), keepAlive=True )[2]
-        sys = self.sendRequest( ('EMS_REQ_SYS_STATUS', 'None', None), keepAlive=True )[2]
         soc = self.sendRequest( ('EMS_REQ_BAT_SOC', 'None', None), keepAlive=True )[2]
         solar = self.sendRequest( ('EMS_REQ_POWER_PV', 'None', None), keepAlive=True )[2]
+        add = self.sendRequest( ('EMS_REQ_POWER_ADD', 'None', None), keepAlive=True )[2]
         bat = self.sendRequest( ('EMS_REQ_POWER_BAT', 'None', None), keepAlive=True )[2]
         home = self.sendRequest( ('EMS_REQ_POWER_HOME', 'None', None), keepAlive=True )[2]
         grid = self.sendRequest( ('EMS_REQ_POWER_GRID', 'None', None), keepAlive=True )[2]
@@ -282,9 +298,12 @@ class E3DC:
 
         # last call, use keepAlive value
         autarky = round(self.sendRequest( ('EMS_REQ_AUTARKY', 'None', None), keepAlive=keepAlive )[2],2)
+<<<<<<< HEAD
         
         #home = solar + grid - bat - wb # make balance = 0
 
+=======
+>>>>>>> 3f5cf241260554a34f64487860996cdca03924a6
             
         outObj = {
             'autarky': autarky,
@@ -295,11 +314,11 @@ class E3DC:
             },
             'production': {
                 'solar' : solar,
+                'add' : -add,
                 'grid' : grid
             },
             'selfConsumption': sc,
             'stateOfCharge': soc,
-            'sysStatus': sys,
             'time': datetime.datetime.utcfromtimestamp(ts).replace(tzinfo=datetime.timezone.utc)
             }
             
@@ -372,6 +391,8 @@ class E3DC:
                 break
             except RSCPAuthenticationError:
                 raise AuthenticationError()
+            except RSCPNotAvailableError:
+                raise NotAvailableError()
             except Exception as err:
                 retry += 1
                 if retry > retries:
@@ -604,7 +625,7 @@ class E3DC:
 
         response = self.sendRequest(('DB_REQ_HISTORY_DATA_DAY', 'Container', [
             ('DB_REQ_HISTORY_TIME_START', 'Uint64', requestDate),
-            ('DB_REQ_HISTORY_TIME_INTERVAL', 'Uint64', 0),
+            ('DB_REQ_HISTORY_TIME_INTERVAL', 'Uint64', span),
             ('DB_REQ_HISTORY_TIME_SPAN', 'Uint64', span)]), keepAlive=keepAlive)
 
         outObj = {
@@ -627,6 +648,7 @@ class E3DC:
         self.deratePercent  = round(self.sendRequest( ('EMS_REQ_DERATE_AT_PERCENT_VALUE', 'None', None), keepAlive = True  )[2] * 100)
         self.deratePower  = self.sendRequest( ('EMS_REQ_DERATE_AT_POWER_VALUE', 'None', None), keepAlive = True  )[2]
         self.installedPeakPower  = self.sendRequest( ('EMS_REQ_INSTALLED_PEAK_POWER', 'None', None), keepAlive = True  )[2]
+        self.externalSourceAvailable  = self.sendRequest( ('EMS_REQ_EXT_SRC_AVAILABLE', 'None', None), keepAlive = True  )[2]
         self.macAddress = self.sendRequest( ('INFO_REQ_MAC_ADDRESS', 'None', None), keepAlive = True  )[2]
         if not self.serialNumber: # do not send this for a web connection because it screws up the handshake!
             self._set_serial(self.sendRequest( ('INFO_REQ_SERIAL_NUMBER', 'None', None), keepAlive = keepAlive )[2])
@@ -656,18 +678,16 @@ class E3DC:
                     'deratePower': W at which the feed in will be derated
                     'installedBatteryCapacity': installed Battery Capacity in W
                     'installedPeakPower': installed peak power in W
+                    'externalSourceAvailable': wether an additional power meter is installed
                     'maxAcPower': max AC power
                     'macAddress': the mac address
                     'maxBatChargePower': max Battery charge power
                     'maxBatDischargePower': max Battery discharge power
                     'model': model connected to
-                    'online': status if connected to online portal
                     'release': release version
                     'serial': serial number of the system 
                 }
         """  
-        
-        online = self.sendRequest( ('SRV_REQ_IS_ONLINE', 'None', None), keepAlive = True )[2]
 
         # use keepAlive setting for last request
         sw = self.sendRequest( ('INFO_REQ_SW_RELEASE', 'None', None), keepAlive = keepAlive  )[2]
@@ -679,16 +699,75 @@ class E3DC:
             'deratePower': self.deratePower,
             'installedBatteryCapacity': self.installedBatteryCapacity,
             'installedPeakPower': self.installedPeakPower,
+            'externalSourceAvailable': self.externalSourceAvailable,
             'maxAcPower': self.maxAcPower,
             'macAddress': self.macAddress,
             'maxBatChargePower': self.maxBatChargePower,
             'maxBatDischargePower': self.maxBatDischargePower,
             'model': self.model,
-            'online': online,
             'release': sw,
             'serial': self.serialNumber
             }
         return outObj        
+
+    def get_system_status(self, keepAlive = False):
+        """Polls the system status via rscp protocol locally
+        
+        Returns:
+            Dictionary containing the system status structured as follows:
+                {
+                    'dcdcAlive': dcdc alive
+                    'powerMeterAlive': power meter alive
+                    'batteryModuleAlive': battery module alive
+                    'pvModuleAlive': pv module alive
+                    'pvInverterInited': pv inverter inited
+                    'serverConnectionAlive': server connection alive
+                    'pvDerated':  pv derated due to deratePower limit reached
+                    'emsAlive': emd alive
+                    'acModeBlocked': ad mode blocked
+                    'sysConfChecked': sys conf checked
+                    'emergencyPowerStarted': emergency power started
+                    'emergencyPowerOverride': emergency power override
+                    'wallBoxAlive': wall box alive
+                    'powerSaveEnabled': power save enabled
+                    'chargeIdlePeriodActive': charge idle period active
+                    'dischargeIdlePeriodActive': discharge idle period active
+                    'waitForWeatherBreakthrough': wait for weather breakthrouhgh
+                    'rescueBatteryEnabled': rescue battery enabled
+                    'emergencyReserveReached': emergencey reserve reached
+                    'socSyncRequested': soc sync requested
+                }
+        """  
+
+        # use keepAlive setting for last request
+        sw = self.sendRequest( ('EMS_REQ_SYS_STATUS', 'None', None), keepAlive = keepAlive  )[2]
+        SystemStatusBools = [bool(int(i)) for i in reversed(list(f"{sw:022b}"))]
+
+        outObj = {
+            'dcdcAlive': 0,
+            'powerMeterAlive': 1,
+            'batteryModuleAlive': 2,
+            'pvModuleAlive': 3,
+            'pvInverterInited': 4,
+            'serverConnectionAlive': 5,
+            'pvDerated': 6,
+            'emsAlive': 7,
+            #'acCouplingMode:2;              // 8-9
+            'acModeBlocked': 10,
+            'sysConfChecked': 11,
+            'emergencyPowerStarted': 12,
+            'emergencyPowerOverride': 13,
+            'wallBoxAlive': 14,
+            'powerSaveEnabled': 15,
+            'chargeIdlePeriodActive': 16,
+            'dischargeIdlePeriodActive': 17,
+            'waitForWeatherBreakthrough': 18, # this status bit shows if weather regulated charge is active and the system is waiting for the sun power breakthrough. (PV power > derating power)
+            'rescueBatteryEnabled': 19,
+            'emergencyReserveReached': 20,
+            'socSyncRequested': 21
+            }
+        outObj = {k: SystemStatusBools[v] for k, v in outObj.items()}
+        return outObj  
 
     def get_battery_data(self, batIndex = 0, keepAlive = False):
         """Polls the baterry data via rscp protocol locally
@@ -868,29 +947,53 @@ class E3DC:
             }
         return outObj
 
+
     def get_power_data(self, keepAlive = False):
         """Polls the inverter data via rscp protocol locally
         
         Returns:
-            Dictionary containing the pvi data structured as follows:
+            Dictionary containing the power data structured as follows:
                 {
-                    'acApparentPower': ac apparent power
-                    'acCurrent': ac current
-                    'acEnergyAll': ac energy all
-                    'acPower': ac power
-                    'acReactivePower': ac reactive power
-                    'acVoltage': ac voltage
-                    'dcCurrent': dc current
-                    'dcPower': dc power
-                    'dcVoltage': dc voltage
-                    'deviceConnected': boolean if pvi is connected
-                    'deviceInService': boolean if pvi is in service
-                    'deviceWorking': boolean if pvi is working
-                    'lastError': last error
-                    'temperature': temperature
+                    'maxPhasePower': max power of the device
+                    'power': {
+                        'L1': L1 power
+                        'L2': L2 power
+                        'L3': L3 power
+                    }
                 }
         """  
         res = self.sendRequest( ('PM_REQ_DATA', 'Container', [ ('PM_INDEX', 'Uint16', self.pmIndex), ('PM_REQ_POWER_L1', 'None', None), ('PM_REQ_POWER_L2', 'None', None), ('PM_REQ_POWER_L3', 'None', None), ('PM_REQ_MAX_PHASE_POWER', 'None', None)]))
+        powerL1 = rscpFindTag(res, 'PM_POWER_L1')[2]
+        powerL2 = rscpFindTag(res, 'PM_POWER_L2')[2]
+        powerL3 = rscpFindTag(res, 'PM_POWER_L3')[2]
+        maxPhasePower = rscpFindTag(res, 'PM_MAX_PHASE_POWER')[2]
+
+        outObj = {
+            'power': {
+                'L1': powerL1,
+                'L2': powerL2,
+                'L3': powerL3
+            },
+            'maxPhasePower': maxPhasePower
+            }
+        return outObj
+
+
+    def get_power_data_ext(self, keepAlive = False):
+        """Polls the external inverter data via rscp protocol locally
+        
+        Returns:
+            Dictionary containing the power data structured as follows:
+                {
+                    'maxPhasePower': max power of the device
+                    'power': {
+                        'L1': L1 power
+                        'L2': L2 power
+                        'L3': L3 power
+                    }
+                }
+        """  
+        res = self.sendRequest( ('PM_REQ_DATA', 'Container', [ ('PM_INDEX', 'Uint16', self.pmIndexExt), ('PM_REQ_POWER_L1', 'None', None), ('PM_REQ_POWER_L2', 'None', None), ('PM_REQ_POWER_L3', 'None', None), ('PM_REQ_MAX_PHASE_POWER', 'None', None)]))
         powerL1 = rscpFindTag(res, 'PM_POWER_L1')[2]
         powerL2 = rscpFindTag(res, 'PM_POWER_L2')[2]
         powerL3 = rscpFindTag(res, 'PM_POWER_L3')[2]

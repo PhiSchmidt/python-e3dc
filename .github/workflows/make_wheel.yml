@@ -1,0 +1,36 @@
+name: Build Wheel
+
+# run on new version tag
+on:
+    push:
+        tags: 
+            - v*
+    workflow_dispatch:
+        
+jobs:
+    job:
+        name: Build wheel
+        runs-on: ubuntu-latest
+        steps:
+            - name: Prepare python
+              uses: actions/setup-python@v2
+              with:
+                python-version: 3.8
+            
+            - name: Install python dependencies
+              run: pip install wheel twine
+              
+            - name: Checkout repository
+              uses: actions/checkout@v2
+            
+            - name: Build wheel
+              run: |
+                python setup.py sdist bdist_wheel
+                ls dist
+                twine check dist/*
+                
+            - name: Publish to PyPI
+              uses: pypa/gh-action-pypi-publish@release/v1
+              with:
+                user: __token__
+                password: ${{ secrets.PYPI_TOKEN }}
