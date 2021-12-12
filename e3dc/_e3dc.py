@@ -298,12 +298,9 @@ class E3DC:
 
         # last call, use keepAlive value
         autarky = round(self.sendRequest( ('EMS_REQ_AUTARKY', 'None', None), keepAlive=keepAlive )[2],2)
-<<<<<<< HEAD
         
         #home = solar + grid - bat - wb # make balance = 0
 
-=======
->>>>>>> 3f5cf241260554a34f64487860996cdca03924a6
             
         outObj = {
             'autarky': autarky,
